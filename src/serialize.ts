@@ -3,7 +3,8 @@ import sizeof from 'object-sizeof';
 interface Property {
     valueType: string;
     offset: number;
-    byteSize: number;
+    byteSize?: number;
+    nestedBbo?: BufferBackedObject;
 }
 
 interface BufferBackedObject {
@@ -34,6 +35,12 @@ const handler = {
                 const temp = new Uint8Array(target.buff, offset, property.byteSize);
                 return new TextDecoder().decode(temp);
             }
+            case 'object': {
+                return new Proxy(target.properties[propertyName].nestedBbo!, handler);
+            }
+            case 'null': {
+                return null;
+            }
             default: {
                 throw new Error('not implemented');
             }
@@ -41,16 +48,7 @@ const handler = {
     }
 };
 
-export function serialize(object: Record<string, unknown>): Record<string, unknown> {
-    const size = sizeof(object);
-    const buff = new ArrayBuffer(size);
-
-    const bbo: BufferBackedObject = {
-        buff,
-        properties: {},
-    };
-    const view = new DataView(buff);
-    let offset = 0;
+export function process(object: Record<string, unknown>, buff: ArrayBuffer, view: DataView, bbo: BufferBackedObject, offset = 0): number {
     for (const [key, value] of Object.entries(object)) {
         const valueType = typeof value;
         switch (valueType) {
@@ -91,11 +89,51 @@ export function serialize(object: Record<string, unknown>): Record<string, unkno
                 }
                 break;
             }
+            case 'object': {
+                if (Array.isArray(value)) {
+                    throw new Error('not implemented');
+                }
+
+                if (value === null) {
+                    bbo.properties[key] = {
+                        valueType: 'null',
+                        offset,
+                        byteSize: 0
+                    };
+                    break;
+                }
+
+                const nestedBbo: BufferBackedObject = {
+                    buff,
+                    properties: {}
+                };
+
+                bbo.properties[key] = {
+                    valueType: 'object',
+                    offset,
+                    nestedBbo
+                };
+                offset += process(value as Record<string, unknown>, buff, view, nestedBbo, offset);
+                break;
+            }
             default: {
                 throw new Error('not implemented');
             }
         }
     }
+    return offset;
+}
+
+export function serialize(object: Record<string, unknown>): Record<string, unknown> {
+    const size = sizeof(object);
+    const buff = new ArrayBuffer(size);
+
+    const bbo: BufferBackedObject = {
+        buff,
+        properties: {},
+    };
+    const view = new DataView(buff);
+    process(object, buff, view, bbo);
 
     return new Proxy(bbo, handler);
 }
@@ -110,8 +148,15 @@ function test() {
         someString: "hello world",
         someUnicodeString: "привіт друже як справи?",
         pureUnicodeEmojisString: "🦴🙍☹😔🤬😡",
+        nestedObject: {
+            key: "value",
+            anotherKey: {
+                with: "nested value"
+            }
+        }
     };
     const bufferedObj = serialize(obj);
+    console.log(bufferedObj);
     console.log(bufferedObj.someNumber);
     console.log(bufferedObj.anotherFpNumber);
     console.log(bufferedObj.boolTrue);
@@ -119,6 +164,8 @@ function test() {
     console.log(bufferedObj.someString);
     console.log(bufferedObj.someUnicodeString);
     console.log(bufferedObj.pureUnicodeEmojisString);
+    console.log((bufferedObj.nestedObject as Record<string, unknown>).key);
+    console.log(((bufferedObj.nestedObject as Record<string, unknown>).anotherKey as Record<string, unknown>).with);
 }
 
 test();
